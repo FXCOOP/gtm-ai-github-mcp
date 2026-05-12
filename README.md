@@ -92,8 +92,17 @@ In Claude (web → Settings → Connectors → Add custom connector):
 | Field | Value |
 |---|---|
 | Name | GTM AI GitHub MCP |
-| URL | `https://YOUR-VERCEL-PROJECT.vercel.app/api/mcp` |
-| Auth | Add header `Authorization: Bearer <MCP_SHARED_SECRET>` (or `x-mcp-secret: <MCP_SHARED_SECRET>` if your client supports custom headers) |
+| Remote MCP server URL | `https://YOUR-VERCEL-PROJECT.vercel.app/api/mcp` |
+| OAuth Client ID (optional) | *leave empty* |
+| OAuth Client Secret (optional) | *leave empty* |
+
+Click **Add**. The server auto-approves the OAuth flow and issues Claude a long-lived access token. No login screen is shown.
+
+### How auth actually works
+
+The MCP route is gated by `withMcpAuth` from `mcp-handler`. A request to `/api/mcp` without a valid bearer token receives an HTTP 401 with a `WWW-Authenticate` header pointing at `/.well-known/oauth-protected-resource/api/mcp`. Claude follows that to `/.well-known/oauth-authorization-server`, then runs the OAuth 2.1 + PKCE dance against `/register`, `/authorize`, and `/token`. The token endpoint returns a signed access token derived from `MCP_SHARED_SECRET`.
+
+For direct curl testing, the raw `MCP_SHARED_SECRET` value is also accepted as a bearer token — convenient for smoke tests, no OAuth round-trip needed.
 
 After connecting, Claude Cowork can call `update_gtm_ai_report_files`.
 

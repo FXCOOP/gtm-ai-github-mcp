@@ -1,4 +1,4 @@
-import { createMcpHandler } from "mcp-handler";
+import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { z, ZodError } from "zod";
 import {
   GithubWriteError,
@@ -6,40 +6,12 @@ import {
   type GithubConfig,
   writeAllowedFiles,
 } from "@/lib/github";
-import {
-  allowedPathsForDate,
-  updateInputSchema,
-} from "@/lib/validators";
+import { verifyAccessToken } from "@/lib/oauth";
+import { allowedPathsForDate, updateInputSchema } from "@/lib/validators";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-function unauthorized() {
-  return new Response(JSON.stringify({ error: "Unauthorized" }), {
-    status: 401,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function serverMisconfigured(message: string) {
-  return new Response(JSON.stringify({ error: message }), {
-    status: 500,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function checkSecret(req: Request, expected: string): boolean {
-  const header = req.headers.get("x-mcp-secret");
-  if (header && header === expected) return true;
-
-  const auth = req.headers.get("authorization");
-  if (auth && auth.toLowerCase().startsWith("bearer ")) {
-    const token = auth.slice(7).trim();
-    if (token === expected) return true;
-  }
-  return false;
-}
 
 function readGithubConfig(): GithubConfig | string {
   const token = process.env.GITHUB_TOKEN;
@@ -50,7 +22,6 @@ function readGithubConfig(): GithubConfig | string {
   return { token, owner, repo, branch };
 }
 
-// The tool input schema as a raw zod shape (mcp-handler wants the shape, not the object).
 const updateInputShape = {
   date: z.string().describe("Report date in YYYY-MM-DD format."),
   latestJson: z
@@ -65,10 +36,7 @@ const updateInputShape = {
   trendLogMarkdown: z
     .string()
     .describe("Full Markdown content of the trend log. Will be written to reports/trend-log.md."),
-  commitMessage: z
-    .string()
-    .optional()
-    .describe("Optional override for the commit message."),
+  commitMessage: z.string().optional().describe("Optional override for the commit message."),
 } as const;
 
 const handler = createMcpHandler(
@@ -81,12 +49,12 @@ const handler = createMcpHandler(
         let input;
         try {
           input = updateInputSchema.parse(rawArgs);
-        } catch (error) {
+        } catch (err) {
           const message =
-            error instanceof ZodError
-              ? error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
-              : error instanceof Error
-                ? error.message
+            err instanceof ZodError
+              ? err.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
+              : err instanceof Error
+                ? err.message
                 : "Invalid input";
           return {
             isError: true,
@@ -96,10 +64,7 @@ const handler = createMcpHandler(
 
         const config = readGithubConfig();
         if (typeof config === "string") {
-          return {
-            isError: true,
-            content: [{ type: "text", text: config }],
-          };
+          return { isError: true, content: [{ type: "text", text: config }] };
         }
 
         const commitMessage =
@@ -117,9 +82,7 @@ const handler = createMcpHandler(
           },
           {
             path: `reports/daily/${input.date}.md`,
-            content: input.dailyMarkdown.endsWith("\n")
-              ? input.dailyMarkdown
-              : input.dailyMarkdown + "\n",
+            content: input.dailyMarkdown.endsWith("\n") ? input.dailyMarkdown : input.dailyMarkdown + "\n",
           },
           {
             path: "reports/trend-log.md",
@@ -160,29 +123,21 @@ const handler = createMcpHandler(
             updatedFiles: allowedPathsForDate(input.date).map((p) => p),
             commitUrls: results.map((r) => r.commitUrl).filter((u): u is string => Boolean(u)),
           };
-          return {
-            content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
-          };
-        } catch (error) {
+          return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+        } catch (err) {
           const message =
-            error instanceof GithubWriteError
-              ? `${error.message} (path: ${error.path})`
-              : error instanceof Error
-                ? error.message
+            err instanceof GithubWriteError
+              ? `${err.message} (path: ${err.path})`
+              : err instanceof Error
+                ? err.message
                 : "Unknown GitHub error";
-          return {
-            isError: true,
-            content: [{ type: "text", text: `GitHub write failed: ${message}` }],
-          };
+          return { isError: true, content: [{ type: "text", text: `GitHub write failed: ${message}` }] };
         }
       },
     );
   },
   {
-    serverInfo: {
-      name: "gtm-ai-github-mcp",
-      version: "0.1.0",
-    },
+    serverInfo: { name: "gtm-ai-github-mcp", version: "0.2.0" },
   },
   {
     basePath: "/api",
@@ -190,15 +145,20 @@ const handler = createMcpHandler(
   },
 );
 
-async function authedHandler(req: Request): Promise<Response> {
-  const expected = process.env.MCP_SHARED_SECRET;
-  if (!expected) {
-    return serverMisconfigured("MCP_SHARED_SECRET is not configured on the server.");
-  }
-  if (!checkSecret(req, expected)) {
-    return unauthorized();
-  }
-  return handler(req);
-}
+const authedHandler = withMcpAuth(
+  handler,
+  (_req, bearerToken) => {
+    const secret = process.env.MCP_SHARED_SECRET;
+    if (!secret || !bearerToken) return undefined;
+    const payload = verifyAccessToken(secret, bearerToken);
+    if (!payload) return undefined;
+    return {
+      token: bearerToken,
+      clientId: payload.sub,
+      scopes: ["mcp"],
+    };
+  },
+  { required: true },
+);
 
 export { authedHandler as GET, authedHandler as POST, authedHandler as DELETE };

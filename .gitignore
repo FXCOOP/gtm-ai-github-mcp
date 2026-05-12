@@ -3,6 +3,7 @@ node_modules
 .vercel
 .env
 .env.local
+test-payload.json
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
